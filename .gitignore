@@ -1,0 +1,11 @@
+# Build/Release files
+*.zip
+
+# Claude Code files
+.claude/
+
+# macOS files
+.DS_Store
+
+# WordPress debug log
+debug.log
