@@ -3,7 +3,7 @@
  * Plugin Name: Texas Sales Tax Reporter
  * Plugin URI: https://cardmachineworks.com
  * Description: Generate quarterly Texas sales tax reports from WooCommerce orders and email them automatically
- * Version: 1.1.3
+ * Version: 1.2.0
  * Author: Card Machine Works
  * Author URI: https://cardmachineworks.com
  * Requires at least: 5.0
@@ -27,13 +27,9 @@ class Texas_Sales_Tax_Reporter {
 
         // Register AJAX handlers
         add_action('wp_ajax_generate_tx_tax_report', array($this, 'ajax_generate_report'));
-        add_action('wp_ajax_save_tx_tax_settings', array($this, 'ajax_save_settings'));
 
         // Add admin scripts
         add_action('admin_enqueue_scripts', array($this, 'enqueue_admin_scripts'));
-
-        // Register settings
-        add_action('admin_init', array($this, 'register_settings'));
 
         // Hook for scheduled reports
         add_action('tx_tax_quarterly_report', array($this, 'send_scheduled_report'));
@@ -51,134 +47,19 @@ class Texas_Sales_Tax_Reporter {
             'texas-sales-tax-reporter',
             array($this, 'admin_page')
         );
-
-        add_submenu_page(
-            'woocommerce',
-            'TX Tax Settings',
-            'TX Tax Settings',
-            'manage_woocommerce',
-            'texas-sales-tax-settings',
-            array($this, 'settings_page')
-        );
     }
 
-    /**
-     * Register settings
-     */
-    public function register_settings() {
-        register_setting('tx_tax_settings', 'tx_tax_enable_scheduled');
-        register_setting('tx_tax_settings', 'tx_tax_scheduled_email');
-        register_setting('tx_tax_settings', 'tx_tax_report_format');
-    }
-    
     /**
      * Enqueue admin scripts
      */
     public function enqueue_admin_scripts($hook) {
-        if ($hook !== 'woocommerce_page_texas-sales-tax-reporter' && $hook !== 'woocommerce_page_texas-sales-tax-settings') {
+        if ($hook !== 'woocommerce_page_texas-sales-tax-reporter') {
             return;
         }
 
         wp_enqueue_script('jquery');
     }
 
-    /**
-     * Settings page content
-     */
-    public function settings_page() {
-        $enable_scheduled = get_option('tx_tax_enable_scheduled', false);
-        $scheduled_email = get_option('tx_tax_scheduled_email', get_option('admin_email'));
-        $report_format = get_option('tx_tax_report_format', 'summary');
-        $next_scheduled = wp_next_scheduled('tx_tax_quarterly_report');
-
-        ?>
-        <div class="wrap">
-            <h1>Texas Sales Tax Settings</h1>
-
-            <form method="post" action="options.php">
-                <?php settings_fields('tx_tax_settings'); ?>
-
-                <div class="card" style="max-width: 800px; margin-top: 20px;">
-                    <h2>Scheduled Quarterly Reports</h2>
-                    <p class="description">Automatically generate and email reports at the end of each quarter (March 31, June 30, September 30, December 31).</p>
-
-                    <table class="form-table">
-                        <tr>
-                            <th scope="row">
-                                <label for="tx_tax_enable_scheduled">Enable Scheduled Reports</label>
-                            </th>
-                            <td>
-                                <input type="checkbox"
-                                       id="tx_tax_enable_scheduled"
-                                       name="tx_tax_enable_scheduled"
-                                       value="1"
-                                       <?php checked($enable_scheduled, true); ?>>
-                                <label for="tx_tax_enable_scheduled">Send quarterly reports automatically</label>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th scope="row">
-                                <label for="tx_tax_scheduled_email">Email Address</label>
-                            </th>
-                            <td>
-                                <input type="email"
-                                       id="tx_tax_scheduled_email"
-                                       name="tx_tax_scheduled_email"
-                                       value="<?php echo esc_attr($scheduled_email); ?>"
-                                       class="regular-text">
-                                <p class="description">Scheduled reports will be sent to this address</p>
-                            </td>
-                        </tr>
-                        <tr>
-                            <th scope="row">
-                                <label for="tx_tax_report_format">Report Format</label>
-                            </th>
-                            <td>
-                                <select id="tx_tax_report_format" name="tx_tax_report_format">
-                                    <option value="summary" <?php selected($report_format, 'summary'); ?>>Summary Only (Total Taxable Sales & Tax)</option>
-                                    <option value="detailed" <?php selected($report_format, 'detailed'); ?>>Detailed (All Order Breakdowns)</option>
-                                </select>
-                                <p class="description">Summary format provides just the totals needed for filing</p>
-                            </td>
-                        </tr>
-                    </table>
-
-                    <?php if ($next_scheduled): ?>
-                    <div class="notice notice-info inline" style="margin: 20px 0;">
-                        <p><strong>Next Scheduled Report:</strong> <?php echo date('F j, Y g:i A', $next_scheduled); ?></p>
-                    </div>
-                    <?php endif; ?>
-
-                    <?php submit_button('Save Settings'); ?>
-                </div>
-            </form>
-
-            <div class="card" style="max-width: 800px; margin-top: 20px;">
-                <h2>Quarter End Dates</h2>
-                <p>Reports are automatically generated on:</p>
-                <ul>
-                    <li><strong>Q1:</strong> March 31 at 11:59 PM</li>
-                    <li><strong>Q2:</strong> June 30 at 11:59 PM</li>
-                    <li><strong>Q3:</strong> September 30 at 11:59 PM</li>
-                    <li><strong>Q4:</strong> December 31 at 11:59 PM</li>
-                </ul>
-            </div>
-        </div>
-
-        <script>
-        jQuery(document).ready(function($) {
-            $('#tx_tax_enable_scheduled').on('change', function() {
-                if ($(this).is(':checked')) {
-                    $('#tx_tax_scheduled_email, #tx_tax_report_format').prop('disabled', false);
-                } else {
-                    $('#tx_tax_scheduled_email, #tx_tax_report_format').prop('disabled', false);
-                }
-            }).trigger('change');
-        });
-        </script>
-        <?php
-    }
-    
     /**
      * Admin page content
      */
@@ -741,7 +622,7 @@ class Texas_Sales_Tax_Reporter {
      */
     public function send_scheduled_report() {
         // Check if scheduled reports are enabled
-        if (!get_option('tx_tax_enable_scheduled')) {
+        if (get_option('tx_tax_enable_scheduled') !== 'yes') {
             return;
         }
 
@@ -832,36 +713,6 @@ class Texas_Sales_Tax_Reporter {
     }
 
     /**
-     * Ajax handler to save settings and reschedule cron
-     */
-    public function ajax_save_settings() {
-        // Verify nonce
-        if (!isset($_POST['nonce']) || !wp_verify_nonce($_POST['nonce'], 'tx_tax_save_settings')) {
-            wp_send_json_error(array('message' => 'Security check failed'));
-        }
-
-        // Check permissions
-        if (!current_user_can('manage_woocommerce')) {
-            wp_send_json_error(array('message' => 'Insufficient permissions'));
-        }
-
-        // Get parameters
-        $enable_scheduled = isset($_POST['enable_scheduled']) && $_POST['enable_scheduled'] == '1';
-
-        // Update option
-        update_option('tx_tax_enable_scheduled', $enable_scheduled);
-
-        // Schedule or unschedule events based on setting
-        if ($enable_scheduled) {
-            self::schedule_quarterly_events();
-        } else {
-            self::unschedule_quarterly_events();
-        }
-
-        wp_send_json_success(array('message' => 'Settings saved'));
-    }
-    
-    /**
      * Get current quarter dates
      */
     private function get_current_quarter_dates() {
@@ -886,6 +737,163 @@ class Texas_Sales_Tax_Reporter {
     }
 }
 
+/**
+ * WooCommerce Settings Page for TX Sales Tax
+ */
+if (!class_exists('WC_Settings_TX_Tax')) {
+    class WC_Settings_TX_Tax extends WC_Settings_Page {
+
+        /**
+         * Constructor
+         */
+        public function __construct() {
+            $this->id    = 'tx_tax';
+            $this->label = __('TX Sales Tax', 'texas-sales-tax-reporter');
+
+            parent::__construct();
+
+            // Hook into WooCommerce save process
+            add_action('woocommerce_update_options_' . $this->id, array($this, 'save_and_reschedule'));
+        }
+
+        /**
+         * Get settings array
+         */
+        public function get_settings() {
+            $next_scheduled = wp_next_scheduled('tx_tax_quarterly_report');
+
+            $settings = array(
+                array(
+                    'title' => __('Texas Sales Tax Settings', 'texas-sales-tax-reporter'),
+                    'type'  => 'title',
+                    'desc'  => __('Configure automated quarterly sales tax reports for Texas.', 'texas-sales-tax-reporter'),
+                    'id'    => 'tx_tax_settings'
+                ),
+
+                array(
+                    'title'   => __('Enable Scheduled Reports', 'texas-sales-tax-reporter'),
+                    'desc'    => __('Automatically generate and email reports at the end of each quarter (March 31, June 30, September 30, December 31)', 'texas-sales-tax-reporter'),
+                    'id'      => 'tx_tax_enable_scheduled',
+                    'default' => 'no',
+                    'type'    => 'checkbox',
+                ),
+
+                array(
+                    'title'       => __('Report Email Address', 'texas-sales-tax-reporter'),
+                    'desc'        => __('Scheduled reports will be sent to this email address', 'texas-sales-tax-reporter'),
+                    'id'          => 'tx_tax_scheduled_email',
+                    'default'     => get_option('admin_email'),
+                    'type'        => 'email',
+                    'css'         => 'min-width: 300px;',
+                    'placeholder' => get_option('admin_email'),
+                ),
+
+                array(
+                    'title'   => __('Report Format', 'texas-sales-tax-reporter'),
+                    'desc'    => __('Summary format provides just the totals needed for filing. Detailed format includes all order breakdowns.', 'texas-sales-tax-reporter'),
+                    'id'      => 'tx_tax_report_format',
+                    'default' => 'summary',
+                    'type'    => 'select',
+                    'options' => array(
+                        'summary'  => __('Summary Only (Total Taxable Sales & Tax)', 'texas-sales-tax-reporter'),
+                        'detailed' => __('Detailed (All Order Breakdowns)', 'texas-sales-tax-reporter'),
+                    ),
+                    'css'     => 'min-width: 300px;',
+                ),
+
+                array(
+                    'type' => 'sectionend',
+                    'id'   => 'tx_tax_settings'
+                ),
+            );
+
+            // Add information section about next scheduled report
+            if ($next_scheduled) {
+                $settings[] = array(
+                    'title' => __('Schedule Information', 'texas-sales-tax-reporter'),
+                    'type'  => 'title',
+                    'desc'  => sprintf(
+                        __('<strong>Next Scheduled Report:</strong> %s', 'texas-sales-tax-reporter'),
+                        date('F j, Y g:i A', $next_scheduled)
+                    ),
+                    'id'    => 'tx_tax_schedule_info'
+                );
+
+                $settings[] = array(
+                    'type' => 'sectionend',
+                    'id'   => 'tx_tax_schedule_info'
+                );
+            }
+
+            // Add quarter end dates information
+            $settings[] = array(
+                'title' => __('Quarter End Dates', 'texas-sales-tax-reporter'),
+                'type'  => 'title',
+                'desc'  => __('Reports are automatically generated on:', 'texas-sales-tax-reporter') . '<br>' .
+                           '<ul style="list-style: disc; margin-left: 20px;">' .
+                           '<li><strong>Q1:</strong> March 31 at 11:59 PM</li>' .
+                           '<li><strong>Q2:</strong> June 30 at 11:59 PM</li>' .
+                           '<li><strong>Q3:</strong> September 30 at 11:59 PM</li>' .
+                           '<li><strong>Q4:</strong> December 31 at 11:59 PM</li>' .
+                           '</ul>',
+                'id'    => 'tx_tax_quarter_info'
+            );
+
+            $settings[] = array(
+                'type' => 'sectionend',
+                'id'   => 'tx_tax_quarter_info'
+            );
+
+            return apply_filters('woocommerce_get_settings_' . $this->id, $settings);
+        }
+
+        /**
+         * Save settings and reschedule cron jobs
+         */
+        public function save_and_reschedule() {
+            // Save settings using WooCommerce's built-in method
+            $settings = $this->get_settings();
+            WC_Admin_Settings::save_fields($settings);
+
+            // Reschedule cron jobs based on new settings
+            $enable_scheduled = get_option('tx_tax_enable_scheduled');
+
+            if ($enable_scheduled === 'yes') {
+                Texas_Sales_Tax_Reporter::schedule_quarterly_events();
+            } else {
+                Texas_Sales_Tax_Reporter::unschedule_quarterly_events();
+            }
+        }
+    }
+}
+
+/**
+ * Add TX Tax settings tab to WooCommerce
+ */
+function texas_sales_tax_add_settings_tab($settings) {
+    if (class_exists('WC_Settings_TX_Tax')) {
+        $settings[] = new WC_Settings_TX_Tax();
+    }
+    return $settings;
+}
+add_filter('woocommerce_get_settings_pages', 'texas_sales_tax_add_settings_tab');
+
+/**
+ * Migrate checkbox value from true/false to yes/no
+ */
+function texas_sales_tax_migrate_checkbox_value() {
+    $current_value = get_option('tx_tax_enable_scheduled');
+
+    // Only migrate if value is boolean
+    if ($current_value === true || $current_value === '1' || $current_value === 1) {
+        update_option('tx_tax_enable_scheduled', 'yes');
+    } elseif ($current_value === false || $current_value === '0' || $current_value === 0 || $current_value === '') {
+        update_option('tx_tax_enable_scheduled', 'no');
+    }
+    // If already 'yes' or 'no', no migration needed
+}
+add_action('plugins_loaded', 'texas_sales_tax_migrate_checkbox_value', 5);
+
 // Initialize plugin
 function texas_sales_tax_reporter_init() {
     if (class_exists('WooCommerce')) {
@@ -897,7 +905,7 @@ add_action('plugins_loaded', 'texas_sales_tax_reporter_init');
 // Activation hook
 function texas_sales_tax_reporter_activate() {
     // Schedule events if enabled
-    if (get_option('tx_tax_enable_scheduled')) {
+    if (get_option('tx_tax_enable_scheduled') === 'yes') {
         Texas_Sales_Tax_Reporter::schedule_quarterly_events();
     }
 }
@@ -910,14 +918,3 @@ function texas_sales_tax_reporter_deactivate() {
 }
 register_deactivation_hook(__FILE__, 'texas_sales_tax_reporter_deactivate');
 
-// Hook to reschedule when settings are saved
-function texas_sales_tax_reschedule_on_save($option_name) {
-    if ($option_name === 'tx_tax_enable_scheduled') {
-        if (get_option('tx_tax_enable_scheduled')) {
-            Texas_Sales_Tax_Reporter::schedule_quarterly_events();
-        } else {
-            Texas_Sales_Tax_Reporter::unschedule_quarterly_events();
-        }
-    }
-}
-add_action('update_option', 'texas_sales_tax_reschedule_on_save', 10, 1);
