@@ -3,7 +3,7 @@
  * Plugin Name: Texas Sales Tax Reporter
  * Plugin URI: https://cardmachineworks.com
  * Description: Generate quarterly Texas sales tax reports from WooCommerce orders and email them automatically
- * Version: 1.2.1
+ * Version: 1.3.0
  * Author: Card Machine Works
  * Author URI: https://cardmachineworks.com
  * Requires at least: 5.0
@@ -169,7 +169,16 @@ class Texas_Sales_Tax_Reporter {
             
             <div class="card" style="max-width: 800px; margin-top: 20px;">
                 <h3>Quick Quarter Selection</h3>
-                <p>
+                <p style="margin-bottom: 10px;">
+                    <label for="quarter_year" style="margin-right: 10px;"><strong>Year:</strong></label>
+                    <select id="quarter_year" style="width: 100px; margin-right: 20px;">
+                        <?php
+                        $current_year = date('Y');
+                        for ($y = $current_year; $y >= $current_year - 3; $y--) {
+                            echo '<option value="' . $y . '">' . $y . '</option>';
+                        }
+                        ?>
+                    </select>
                     <button type="button" class="button" onclick="setQuarter('Q1')">Q1 (Jan-Mar)</button>
                     <button type="button" class="button" onclick="setQuarter('Q2')">Q2 (Apr-Jun)</button>
                     <button type="button" class="button" onclick="setQuarter('Q3')">Q3 (Jul-Sep)</button>
@@ -223,9 +232,9 @@ class Texas_Sales_Tax_Reporter {
         });
         
         function setQuarter(quarter) {
-            var year = new Date().getFullYear();
+            var year = document.getElementById('quarter_year').value;
             var startDate, endDate;
-            
+
             switch(quarter) {
                 case 'Q1':
                     startDate = year + '-01-01';
@@ -244,7 +253,7 @@ class Texas_Sales_Tax_Reporter {
                     endDate = year + '-12-31';
                     break;
             }
-            
+
             document.getElementById('start_date').value = startDate;
             document.getElementById('end_date').value = endDate;
         }
@@ -346,13 +355,13 @@ class Texas_Sales_Tax_Reporter {
      */
     private function generate_report($start_date, $end_date) {
         global $wpdb;
-        
+
         // Adjust end date to include entire day
         $end_date_time = $end_date . ' 23:59:59';
-        
-        // Get orders with detailed breakdown
+
+        // Get orders with detailed breakdown, including refund amounts
         $query = $wpdb->prepare("
-            SELECT 
+            SELECT
                 p.ID as order_id,
                 p.post_date as order_date,
                 MAX(CASE WHEN pm.meta_key = '_order_total' THEN pm.meta_value END) as order_total,
@@ -362,38 +371,60 @@ class Texas_Sales_Tax_Reporter {
                 MAX(CASE WHEN pm.meta_key = '_order_shipping_tax' THEN pm.meta_value END) as shipping_tax,
                 MAX(CASE WHEN pm.meta_key = '_shipping_city' THEN pm.meta_value END) as city,
                 MAX(CASE WHEN pm.meta_key = '_shipping_postcode' THEN pm.meta_value END) as zip_code,
-                MAX(CASE WHEN pm.meta_key = '_billing_email' THEN pm.meta_value END) as customer_email
+                MAX(CASE WHEN pm.meta_key = '_billing_email' THEN pm.meta_value END) as customer_email,
+                COALESCE((
+                    SELECT SUM(refund_meta.meta_value)
+                    FROM {$wpdb->posts} refund
+                    INNER JOIN {$wpdb->postmeta} refund_meta ON refund.ID = refund_meta.post_id
+                    WHERE refund.post_type = 'shop_order_refund'
+                    AND refund.post_parent = p.ID
+                    AND refund_meta.meta_key = '_refund_amount'
+                ), 0) as refund_total
             FROM {$wpdb->posts} p
             INNER JOIN {$wpdb->postmeta} pm ON p.ID = pm.post_id
             WHERE p.post_type = 'shop_order'
                 AND p.post_status IN ('wc-completed', 'wc-processing')
                 AND p.post_date BETWEEN %s AND %s
                 AND p.ID IN (
-                    SELECT post_id 
-                    FROM {$wpdb->postmeta} 
-                    WHERE meta_key = '_shipping_state' 
+                    SELECT post_id
+                    FROM {$wpdb->postmeta}
+                    WHERE meta_key = '_shipping_state'
                     AND meta_value = 'TX'
                 )
             GROUP BY p.ID
             ORDER BY p.post_date DESC
         ", $start_date, $end_date_time);
-        
+
         $orders = $wpdb->get_results($query);
-        
-        // Calculate totals
+
+        // Calculate totals (accounting for refunds)
         $total_orders = count($orders);
         $total_order_value = 0;
         $total_sales_tax = 0;
         $total_cart_tax = 0;
         $total_shipping_cost = 0;
         $total_shipping_tax = 0;
+        $total_refunds = 0;
 
         foreach ($orders as $order) {
-            $total_order_value += floatval($order->order_total);
-            $total_sales_tax += floatval($order->order_tax);
-            $total_cart_tax += floatval($order->cart_tax);
+            $refund_amount = floatval($order->refund_total);
+            $order_total = floatval($order->order_total);
+            $order_tax = floatval($order->order_tax);
+
+            // Calculate refund ratio to proportionally reduce tax
+            $refund_ratio = ($order_total > 0) ? ($refund_amount / $order_total) : 0;
+
+            // Store net values on the order object for display
+            $order->net_total = $order_total - $refund_amount;
+            $order->net_tax = $order_tax * (1 - $refund_ratio);
+            $order->has_refund = ($refund_amount > 0);
+
+            $total_order_value += $order->net_total;
+            $total_sales_tax += $order->net_tax;
+            $total_cart_tax += floatval($order->cart_tax) * (1 - $refund_ratio);
             $total_shipping_cost += floatval($order->shipping_cost);
-            $total_shipping_tax += floatval($order->shipping_tax);
+            $total_shipping_tax += floatval($order->shipping_tax) * (1 - $refund_ratio);
+            $total_refunds += $refund_amount;
         }
 
         // Calculate taxable sales (total before tax)
@@ -408,6 +439,7 @@ class Texas_Sales_Tax_Reporter {
             'total_cart_tax' => $total_cart_tax,
             'total_shipping_cost' => $total_shipping_cost,
             'total_shipping_tax' => $total_shipping_tax,
+            'total_refunds' => $total_refunds,
             'start_date' => $start_date,
             'end_date' => $end_date
         );
@@ -459,8 +491,14 @@ class Texas_Sales_Tax_Reporter {
                     <span>Total Order Value (w/ tax):</span>
                     <span><strong>$<?php echo number_format($report_data['total_order_value'], 2); ?></strong></span>
                 </div>
+                <?php if ($report_data['total_refunds'] > 0): ?>
+                <div class="summary-item" style="background-color: #ffe6e6; margin: 10px -20px; padding: 10px 20px;">
+                    <span>Total Refunds:</span>
+                    <span style="color: #d63638;">-$<?php echo number_format($report_data['total_refunds'], 2); ?></span>
+                </div>
+                <?php endif; ?>
                 <div class="summary-item" style="background-color: #f9f9f9; margin: 10px -20px; padding: 10px 20px;">
-                    <span>Tax on Products:</span>
+                    <span>Tax on Products (net):</span>
                     <span>$<?php echo number_format($report_data['total_cart_tax'], 2); ?></span>
                 </div>
                 <div class="summary-item" style="background-color: #f9f9f9; margin: 10px -20px 0; padding: 10px 20px;">
@@ -468,11 +506,11 @@ class Texas_Sales_Tax_Reporter {
                     <span>$<?php echo number_format($report_data['total_shipping_cost'], 2); ?></span>
                 </div>
                 <div class="summary-item" style="background-color: #f9f9f9; margin: 0 -20px 10px; padding: 10px 20px;">
-                    <span>Tax on Shipping:</span>
+                    <span>Tax on Shipping (net):</span>
                     <span>$<?php echo number_format($report_data['total_shipping_tax'], 2); ?></span>
                 </div>
                 <div class="summary-item" style="border-top: 2px solid #ddd; padding-top: 15px; margin-top: 15px;">
-                    <span>Total Taxable Sales:</span>
+                    <span>Total Taxable Sales (net):</span>
                     <span style="color: #0073aa;"><strong>$<?php echo number_format($report_data['total_taxable_sales'], 2); ?></strong></span>
                 </div>
                 <div class="summary-item" style="border-top: 3px solid #0073aa; padding-top: 15px;">
@@ -482,7 +520,7 @@ class Texas_Sales_Tax_Reporter {
             </div>
 
             <div style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 15px; margin: 20px 0;">
-                <p style="margin: 0;"><strong>✓ Texas Sales Tax Includes:</strong> Product tax ($<?php echo number_format($report_data['total_cart_tax'], 2); ?>) + Shipping tax ($<?php echo number_format($report_data['total_shipping_tax'], 2); ?>) = <strong>$<?php echo number_format($report_data['total_sales_tax'], 2); ?></strong></p>
+                <p style="margin: 0;"><strong>✓ Texas Sales Tax Includes:</strong> Product tax ($<?php echo number_format($report_data['total_cart_tax'], 2); ?>) + Shipping tax ($<?php echo number_format($report_data['total_shipping_tax'], 2); ?>) = <strong>$<?php echo number_format($report_data['total_sales_tax'], 2); ?></strong><?php if ($report_data['total_refunds'] > 0): ?><br><em>Note: All figures are net of refunds.</em><?php endif; ?></p>
             </div>
             <?php
         }
@@ -498,31 +536,35 @@ class Texas_Sales_Tax_Reporter {
                     <th>Order Date</th>
                     <th>City</th>
                     <th>ZIP</th>
-                    <th>Taxable</th>
-                    <th>Tax</th>
-                    <th>Total</th>
+                    <th>Taxable (net)</th>
+                    <th>Tax (net)</th>
+                    <th>Total (net)</th>
                 </tr>
             </thead>
             <tbody>
                 <?php foreach ($report_data['orders'] as $order):
-                    $order_total = floatval($order->order_total);
-                    $total_tax = floatval($order->order_tax);
-                    $taxable_total = $order_total - $total_tax;
+                    $net_total = floatval($order->net_total);
+                    $net_tax = floatval($order->net_tax);
+                    $taxable_total = $net_total - $net_tax;
+                    $row_style = $order->has_refund ? 'background-color: #fff8e5;' : '';
                 ?>
-                <tr>
-                    <td><a href="<?php echo esc_url(admin_url('post.php?post=' . $order->order_id . '&action=edit')); ?>" target="_blank">#<?php echo esc_html($order->order_id); ?></a></td>
+                <tr style="<?php echo $row_style; ?>">
+                    <td>
+                        <a href="<?php echo esc_url(admin_url('post.php?post=' . $order->order_id . '&action=edit')); ?>" target="_blank">#<?php echo esc_html($order->order_id); ?></a>
+                        <?php if ($order->has_refund): ?><span style="color: #d63638; font-size: 11px;"> (partial refund)</span><?php endif; ?>
+                    </td>
                     <td><?php echo esc_html(date('M j, Y', strtotime($order->order_date))); ?></td>
                     <td><?php echo esc_html($order->city); ?></td>
                     <td><?php echo esc_html($order->zip_code); ?></td>
                     <td>$<?php echo number_format($taxable_total, 2); ?></td>
-                    <td>$<?php echo number_format($total_tax, 2); ?></td>
-                    <td><strong>$<?php echo number_format($order_total, 2); ?></strong></td>
+                    <td>$<?php echo number_format($net_tax, 2); ?></td>
+                    <td><strong>$<?php echo number_format($net_total, 2); ?></strong></td>
                 </tr>
                 <?php endforeach; ?>
             </tbody>
         </table>
         <p style="margin-top: 10px; font-style: italic; color: #666;">
-            <strong>Note:</strong> "Taxable" = amount before tax, "Total" = final amount including tax
+            <strong>Note:</strong> "Taxable" = amount before tax, "Total" = final amount including tax. All values are net of any refunds.
         </p>
         <?php
         elseif ($report_data['total_orders'] == 0):
@@ -537,79 +579,103 @@ class Texas_Sales_Tax_Reporter {
     }
     
     /**
-     * Send report via email
+     * Send report via email (HTML format)
      */
     private function send_report_email($report_data, $start_date, $end_date, $email_address, $report_format = 'summary') {
         $subject = 'Texas Sales Tax Report - ' . date('F j, Y', strtotime($start_date)) . ' to ' . date('F j, Y', strtotime($end_date));
 
-        // Create email body
-        $message = "Texas Sales Tax Report\n";
-        $message .= "Period: " . date('F j, Y', strtotime($start_date)) . " to " . date('F j, Y', strtotime($end_date)) . "\n";
-        $message .= str_repeat("=", 70) . "\n\n";
+        // Build HTML email
+        $message = '<!DOCTYPE html><html><head><meta charset="UTF-8"></head><body style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; padding: 20px; color: #333;">';
+
+        // Header
+        $message .= '<h1 style="color: #0073aa; border-bottom: 2px solid #0073aa; padding-bottom: 10px;">Texas Sales Tax Report</h1>';
+        $message .= '<p style="font-size: 16px;"><strong>Period:</strong> ' . date('F j, Y', strtotime($start_date)) . ' to ' . date('F j, Y', strtotime($end_date)) . '</p>';
+
+        $has_refunds = isset($report_data['total_refunds']) && $report_data['total_refunds'] > 0;
 
         if ($report_format === 'summary') {
-            // Simplified summary format
-            $message .= "SUMMARY FOR TEXAS COMPTROLLER\n";
-            $message .= str_repeat("=", 70) . "\n\n";
-            $message .= sprintf("  %-30s %s\n", "Total Orders to Texas:", number_format($report_data['total_orders']));
-            $message .= "\n";
-            $message .= sprintf("  %-30s %s\n", "Total Taxable Sales:", "$" . number_format($report_data['total_taxable_sales'], 2));
-            $message .= sprintf("  %-30s %s\n", "Total Sales Tax to Remit:", "$" . number_format($report_data['total_sales_tax'], 2));
-            $message .= "\n" . str_repeat("=", 70) . "\n\n";
-            $message .= "NOTE: Sales tax includes tax on both products and shipping charges.\n";
-            $message .= "      Report the figures above to Texas Comptroller.\n\n";
+            // Summary format
+            $message .= '<div style="background: #f0f7ff; border: 2px solid #0073aa; border-radius: 8px; padding: 20px; margin: 20px 0;">';
+            $message .= '<h2 style="margin-top: 0; color: #0073aa;">Summary for Texas Comptroller</h2>';
+            $message .= '<table style="width: 100%; border-collapse: collapse;">';
+            $message .= '<tr><td style="padding: 10px 0; border-bottom: 1px solid #ddd;">Total Orders to Texas:</td><td style="padding: 10px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">' . number_format($report_data['total_orders']) . '</td></tr>';
+            if ($has_refunds) {
+                $message .= '<tr><td style="padding: 10px 0; border-bottom: 1px solid #ddd; background: #ffe6e6;">Total Refunds:</td><td style="padding: 10px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold; color: #d63638; background: #ffe6e6;">-$' . number_format($report_data['total_refunds'], 2) . '</td></tr>';
+            }
+            $message .= '<tr><td style="padding: 10px 0; border-bottom: 1px solid #ddd;">Total Taxable Sales (net):</td><td style="padding: 10px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold; color: #0073aa;">$' . number_format($report_data['total_taxable_sales'], 2) . '</td></tr>';
+            $message .= '<tr style="background: #e8f4fc;"><td style="padding: 15px 10px; font-size: 18px; font-weight: bold;">Total Sales Tax to Remit:</td><td style="padding: 15px 10px; text-align: right; font-size: 18px; font-weight: bold; color: #0073aa;">$' . number_format($report_data['total_sales_tax'], 2) . '</td></tr>';
+            $message .= '</table></div>';
+            $refund_note = $has_refunds ? ' All figures are net of refunds.' : '';
+            $message .= '<p style="background: #fff3cd; border: 1px solid #ffc107; border-radius: 4px; padding: 15px;"><strong>Note:</strong> Sales tax includes tax on both products and shipping charges.' . $refund_note . ' Report the figures above to Texas Comptroller.</p>';
         } else {
             // Detailed format
-            $message .= "QUARTERLY SUMMARY\n";
-            $message .= str_repeat("=", 70) . "\n\n";
-            $message .= sprintf("  %-30s %s\n", "Total Orders to Texas:", number_format($report_data['total_orders']));
-            $message .= sprintf("  %-30s %s\n", "Total Order Value (w/ tax):", "$" . number_format($report_data['total_order_value'], 2));
-            $message .= "\n";
-            $message .= "TAX BREAKDOWN:\n";
-            $message .= sprintf("  %-30s %s\n", "  Product Tax:", "$" . number_format($report_data['total_cart_tax'], 2));
-            $message .= sprintf("  %-30s %s\n", "  Shipping Tax:", "$" . number_format($report_data['total_shipping_tax'], 2));
-            $message .= "  " . str_repeat("-", 50) . "\n";
-            $message .= sprintf("  %-30s %s\n", "  TOTAL TAXABLE SALES:", "$" . number_format($report_data['total_taxable_sales'], 2));
-            $message .= sprintf("  %-30s %s\n", "  TOTAL TAX TO REMIT:", "$" . number_format($report_data['total_sales_tax'], 2));
-            $message .= "\n" . str_repeat("=", 70) . "\n\n";
+            $message .= '<div style="background: #f0f7ff; border: 2px solid #0073aa; border-radius: 8px; padding: 20px; margin: 20px 0;">';
+            $message .= '<h2 style="margin-top: 0; color: #0073aa;">Quarterly Summary</h2>';
+            $message .= '<table style="width: 100%; border-collapse: collapse;">';
+            $message .= '<tr><td style="padding: 8px 0; border-bottom: 1px solid #ddd;">Total Orders to Texas:</td><td style="padding: 8px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">' . number_format($report_data['total_orders']) . '</td></tr>';
+            $message .= '<tr><td style="padding: 8px 0; border-bottom: 1px solid #ddd;">Total Order Value (net):</td><td style="padding: 8px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold;">$' . number_format($report_data['total_order_value'], 2) . '</td></tr>';
+            if ($has_refunds) {
+                $message .= '<tr><td style="padding: 8px 0; border-bottom: 1px solid #ddd; background: #ffe6e6;">Total Refunds:</td><td style="padding: 8px 0; border-bottom: 1px solid #ddd; text-align: right; font-weight: bold; color: #d63638; background: #ffe6e6;">-$' . number_format($report_data['total_refunds'], 2) . '</td></tr>';
+            }
+            $message .= '</table>';
 
+            $message .= '<h3 style="margin-top: 20px; margin-bottom: 10px;">Tax Breakdown (net of refunds)</h3>';
+            $message .= '<table style="width: 100%; border-collapse: collapse; background: #f9f9f9; border-radius: 4px;">';
+            $message .= '<tr><td style="padding: 8px 10px;">Product Tax:</td><td style="padding: 8px 10px; text-align: right;">$' . number_format($report_data['total_cart_tax'], 2) . '</td></tr>';
+            $message .= '<tr><td style="padding: 8px 10px;">Shipping Tax:</td><td style="padding: 8px 10px; text-align: right;">$' . number_format($report_data['total_shipping_tax'], 2) . '</td></tr>';
+            $message .= '</table>';
+
+            $message .= '<table style="width: 100%; border-collapse: collapse; margin-top: 15px;">';
+            $message .= '<tr style="border-top: 2px solid #ddd;"><td style="padding: 12px 0; font-weight: bold;">Total Taxable Sales (net):</td><td style="padding: 12px 0; text-align: right; font-weight: bold; color: #0073aa;">$' . number_format($report_data['total_taxable_sales'], 2) . '</td></tr>';
+            $message .= '<tr style="background: #e8f4fc;"><td style="padding: 15px 10px; font-size: 18px; font-weight: bold;">Total Sales Tax to Remit:</td><td style="padding: 15px 10px; text-align: right; font-size: 18px; font-weight: bold; color: #0073aa;">$' . number_format($report_data['total_sales_tax'], 2) . '</td></tr>';
+            $message .= '</table></div>';
+
+            // Order details table
             if ($report_data['total_orders'] > 0) {
-                $message .= "ORDER DETAILS\n";
-                $message .= str_repeat("=", 90) . "\n";
-                $message .= sprintf("%-7s %-13s %-16s %-13s %11s %9s %11s\n",
-                    "Order", "Date", "City", "ZIP", "Taxable", "Tax", "Total");
-                $message .= str_repeat("-", 90) . "\n";
+                $message .= '<h2 style="margin-top: 30px;">Order Details</h2>';
+                $message .= '<table style="width: 100%; border-collapse: collapse; font-size: 14px;">';
+                $message .= '<thead><tr style="background: #f5f5f5;">';
+                $message .= '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Order</th>';
+                $message .= '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">Date</th>';
+                $message .= '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">City</th>';
+                $message .= '<th style="padding: 10px; text-align: left; border: 1px solid #ddd;">ZIP</th>';
+                $message .= '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Taxable</th>';
+                $message .= '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Tax</th>';
+                $message .= '<th style="padding: 10px; text-align: right; border: 1px solid #ddd;">Total</th>';
+                $message .= '</tr></thead><tbody>';
 
                 foreach ($report_data['orders'] as $order) {
-                    $order_total = floatval($order->order_total);
-                    $total_tax = floatval($order->order_tax);
-                    $taxable_total = $order_total - $total_tax;
+                    $net_total = floatval($order->net_total);
+                    $net_tax = floatval($order->net_tax);
+                    $taxable_total = $net_total - $net_tax;
+                    $row_style = $order->has_refund ? 'background: #fff8e5;' : '';
+                    $refund_indicator = $order->has_refund ? ' <span style="color: #d63638; font-size: 11px;">(refund)</span>' : '';
 
-                    $message .= sprintf(
-                        "%-7s %-13s %-16s %-13s %11s %9s %11s\n",
-                        '#' . $order->order_id,
-                        date('M j, Y', strtotime($order->order_date)),
-                        substr($order->city, 0, 16),
-                        $order->zip_code,
-                        '$' . number_format($taxable_total, 2),
-                        '$' . number_format($total_tax, 2),
-                        '$' . number_format($order_total, 2)
-                    );
+                    $message .= '<tr style="' . $row_style . '">';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd;">#' . esc_html($order->order_id) . $refund_indicator . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd;">' . date('M j, Y', strtotime($order->order_date)) . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd;">' . esc_html($order->city) . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd;">' . esc_html($order->zip_code) . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd; text-align: right;">$' . number_format($taxable_total, 2) . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd; text-align: right;">$' . number_format($net_tax, 2) . '</td>';
+                    $message .= '<td style="padding: 8px 10px; border: 1px solid #ddd; text-align: right; font-weight: bold;">$' . number_format($net_total, 2) . '</td>';
+                    $message .= '</tr>';
                 }
-                $message .= str_repeat("=", 90) . "\n\n";
-                $message .= "NOTE: 'Taxable' = amount before tax, 'Total' = final amount including tax\n\n";
+                $message .= '</tbody></table>';
+                $message .= '<p style="font-size: 13px; color: #666; font-style: italic;"><strong>Note:</strong> "Taxable" = amount before tax, "Total" = final amount including tax. All values are net of any refunds.</p>';
             }
         }
 
-        $message .= "File your return at:\n";
-        $message .= "https://security.app.cpa.state.tx.us/public/login\n\n";
-        $message .= str_repeat("=", 70) . "\n";
-        $message .= "Generated: " . current_time('F j, Y g:i A') . "\n";
-        $message .= "Site: " . get_bloginfo('name') . " (" . get_bloginfo('url') . ")\n";
+        // Footer
+        $message .= '<div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #ddd;">';
+        $message .= '<p><strong>File your return at:</strong><br><a href="https://security.app.cpa.state.tx.us/public/login" style="color: #0073aa;">https://security.app.cpa.state.tx.us/public/login</a></p>';
+        $message .= '<p style="font-size: 13px; color: #666;">Generated: ' . current_time('F j, Y g:i A') . '<br>';
+        $message .= 'Site: ' . esc_html(get_bloginfo('name')) . ' (' . esc_html(get_bloginfo('url')) . ')</p>';
+        $message .= '</div></body></html>';
 
-        // Set headers
+        // Set headers for HTML email
         $headers = array(
-            'Content-Type: text/plain; charset=UTF-8',
+            'Content-Type: text/html; charset=UTF-8',
             'From: ' . get_bloginfo('name') . ' <' . get_option('admin_email') . '>'
         );
 
@@ -629,8 +695,8 @@ class Texas_Sales_Tax_Reporter {
         $email = get_option('tx_tax_scheduled_email', get_option('admin_email'));
         $report_format = get_option('tx_tax_report_format', 'summary');
 
-        // Get the previous quarter dates
-        $quarter_dates = $this->get_previous_quarter_dates();
+        // Get current quarter dates (scheduled reports run at END of quarter)
+        $quarter_dates = $this->get_current_quarter_dates();
 
         // Generate report
         $report_data = $this->generate_report($quarter_dates['start'], $quarter_dates['end']);
